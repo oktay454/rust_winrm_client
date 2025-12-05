@@ -4,11 +4,11 @@ Windows Remote Management (WinRM) client written in Rust.
 
 ## Özellikler
 
-- ✅ **NTLM Authentication** - Tam destek
-- ✅ **Remote Command Execution** - PowerShell ve CMD
-- ✅ **File Transfer** - Upload & Download
-- ✅ **Improved Error Handling** - Detaylı hata mesajları
-- ✅ **CLI İyileştirmeleri** - Exit codes, env vars, verbose/quiet modlar
+- ✅ **NTLM Kimlik Doğrulama** - Tam destek
+- ✅ **Uzantan Komut Çalıştırma** - PowerShell ve CMD
+- ✅ **Dosya Aktarımı** - İndirme & Gönderme
+- ✅ **Improved Error Handling** - Detaylı hata iletileri
+- ✅ **CLI İyileştirmeleri** - Çıkış kodları, ortam değişkenleri, detaylı/sessiz çıktılar
 - ⚠️ **Kerberos** - Stub (bilgilendirici mesaj)
 
 ## Kurulum
@@ -31,7 +31,7 @@ winrm-client -e 10.0.3.203 -u administrator -p "password" --encrypt --insecure c
 winrm-client --endpoint server --user admin --password pass command "ipconfig"
 ```
 
-### Dosya Transfer
+### Dosya Aktarımı
 
 ```bash
 # Upload
@@ -60,19 +60,19 @@ winrm-client command "whoami"
 - ✅ `true` veya `false` (büyük/küçük harf duyarlı)
 - ❌ `1`, `0`, `yes`, `no` çalışmaz
 
-### Verbose/Quiet Modlar
+### Detaylı/Sessiz Kipler
 
 ```bash
-# Sessiz mod (varsayılan) - sadece komut çıktısı
+# Sessiz kip (varsayılan) - sadece komut çıktısı
 winrm-client -e server command "test"
 
-# Verbose mod - detaylı loglar
+# Verbose kip - detaylı çıktılar
 winrm-client -v -e server command "test"
 ```
 
 ## Parametreler
 
-| Kısa | Uzun | Env Var | Açıklama |
+| Kısa | Uzun | Ortam Değişkeni | Açıklama |
 |------|------|---------|----------|
 | `-e` | `--endpoint` | `WINRM_ENDPOINT` | WinRM endpoint (IP veya hostname) |
 | `-u` | `--user` | `WINRM_USER` | Kullanıcı adı |
@@ -83,18 +83,18 @@ winrm-client -v -e server command "test"
 | `-k` | `--insecure` | `WINRM_INSECURE` | SSL sertifika doğrulamasını atla |
 | `-v` | `--verbose` | `WINRM_VERBOSE` | Verbose output |
 
-## Exit Kodları
+## Çıkış Kodları
 
 | Kod |  Anlamı |
 |-----|---------|
 | 0 | Başarılı |
-| 1 | Authentication hatası |
-| 2 | Connection hatası |
-| 3 | Command execution hatası |
-| 4 | File transfer hatası |
+| 1 | Kimlik doğrulama hatası |
+| 2 | Bağlantı hatası |
+| 3 | Komut çalıştırma hatası |
+| 4 | Dosya aktarım hatası |
 
 ```bash
-# Exit code kontrolü
+# Çıkış kodu denetimi
 winrm-client -e server command "test"
 echo $?  # Exit code'u göster
 ```
@@ -107,7 +107,7 @@ winrm-client -e 10.0.3.203 -u administrator -p "Admin789" \
   --encrypt --insecure command "hostname"
 ```
 
-### Env Vars ile
+### Ortam Değişkenleri ile
 ```bash
 export WINRM_ENDPOINT=10.0.3.203
 export WINRM_USER=admin
@@ -125,13 +125,13 @@ winrm-client -e server command "Get-Process | Select-Object -First 5"
 
 ## Bilinen Sınırlamalar
 
-- **Kerberos**: Tam implementasyon yok (stub mesaj gösterir)
-- **HTTP Message Encryption**: HTTP (5985) için app-level encryption yok - HTTPS kullanın
+- **Kerberos**: Tam uygulama yok (stub mesaj gösterir)
+- **HTTP Message Encryption**: HTTP (5985) için uygulama seviyesi şifreleme yok - HTTPS kullanın
 - **CredSSP**: Desteklenmiyor
 
 ## Katkıda Bulunma
 
-Pull request'ler memnuniyetle karşılanır!
+Katkılar memnuniyetle karşılanır!
 
 ## Lisans
 
