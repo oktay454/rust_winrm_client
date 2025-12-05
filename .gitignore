@@ -1,0 +1,22 @@
+# Build artifacts (cargo creates these)
+/target/
+
+# Vendored dependencies (cargo vendor)
+/vendor/
+
+# Backup files
+**/*.rs.bk
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+.env.local

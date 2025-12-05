@@ -1,0 +1,16 @@
+[package]
+name = "rust-winrm-client"
+version = "0.1.1"
+edition = "2021"
+authors = ["WinRM Client Contributors"]
+description = "CLI tool for WinRM management - remote Windows command execution and file transfer"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/oktay454/rust-winrm-client"
+homepage = "https://github.com/oktay454/rust-winrm-client"
+keywords = ["winrm", "windows", "cli", "remote", "management"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+librust-winrm = "0.1.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"

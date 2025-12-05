@@ -1,0 +1,356 @@
+use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, CONTENT_LENGTH};
+use std::time::Duration;
+use std::io::Read;
+use base64::{Engine as _, engine::general_purpose};
+use anyhow::Result;
+use crate::error::WinRMError;
+use sspi::{
+    AuthIdentity, CredentialUse, DataRepresentation, Ntlm, Sspi, SspiImpl, SecurityBuffer, BufferType,
+    Username, ClientRequestFlags,
+};
+
+pub struct WinRMClient {
+    endpoint: String,
+    user: String,
+    password: String,
+    client: Client,
+    auth_method: String,
+}
+
+impl WinRMClient {
+    pub fn new(endpoint: &str, user: &str, password: &str, auth_method: &str, insecure: bool, cacert: Option<String>) -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/soap+xml;charset=UTF-8"));
+        headers.insert("User-Agent", HeaderValue::from_static("Rust WinRM Client"));
+
+        let mut builder = Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(60))
+            .http1_only()  // WinRM requires HTTP/1.1
+            .cookie_store(true); // Important for session persistence
+
+        if insecure {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        
+        if let Some(cert_path) = cacert {
+            let mut buf = Vec::new();
+            std::fs::File::open(cert_path)?.read_to_end(&mut buf)?;
+            let cert = reqwest::Certificate::from_pem(&buf)?;
+            builder = builder.add_root_certificate(cert);
+        }
+
+        let client = builder.build()?;
+
+        Ok(WinRMClient {
+            endpoint: endpoint.to_string(),
+            user: user.to_string(),
+            password: password.to_string(),
+            client,
+            auth_method: auth_method.to_string(),
+        })
+    }
+
+    fn send_message(&mut self, body: &str) -> Result<String> {
+        let mut response = self.client.post(&self.endpoint)
+            .header(CONTENT_TYPE, "application/soap+xml;charset=UTF-8")
+            .body(body.to_string())
+            .send()?;
+
+        if response.status() == 401 && self.auth_method == "ntlm" {
+            return self.handle_ntlm_negotiation(body);
+        } else if response.status() == 401 && self.auth_method == "basic" {
+             // Basic Auth
+             response = self.client.post(&self.endpoint)
+                .header(AUTHORIZATION, format!("Basic {}", general_purpose::STANDARD.encode(format!("{}:{}", self.user, self.password))))
+                .header(CONTENT_TYPE, "application/soap+xml;charset=UTF-8")
+                .body(body.to_string())
+                .send()?;
+        if response.status() != 200 {
+            return Err(WinRMError::ConnectionError {
+                endpoint: self.endpoint.clone(),
+                details: format!("HTTP {}: {}", response.status(), response.text().unwrap_or_default())
+            }.into());
+        }
+
+        Ok(response.text()?)
+    }
+
+    fn handle_ntlm_negotiation(&mut self, original_body: &str) -> Result<String> {
+        use sspi::SecurityStatus;
+        
+        let mut ntlm = Ntlm::new();
+
+        let (domain, user) = if let Some((d, u)) = self.user.split_once('\\') {
+            (d, u)
+        } else {
+            ("", self.user.as_str())
+        };
+
+        let username = if domain.is_empty() {
+            Username::new(user, None).unwrap()
+        } else {
+            Username::new(user, Some(domain)).unwrap()
+        };
+        
+        let identity = AuthIdentity {
+            username,
+            password: self.password.clone().into(),
+        };
+
+        // Acquire credentials
+        let mut acq_cred_result = ntlm.acquire_credentials_handle()
+            .with_credential_use(CredentialUse::Outbound)
+            .with_auth_data(&identity)
+            .execute(&mut ntlm)?;
+
+        let mut output_buffer = vec![SecurityBuffer::new(Vec::with_capacity(4096), BufferType::Token)];
+        let target_name = self.endpoint.clone();
+        
+        // Step 1: Initialize security context (Type 1 message)
+        let mut builder = ntlm.initialize_security_context()
+            .with_credentials_handle(&mut acq_cred_result.credentials_handle)
+            .with_context_requirements(ClientRequestFlags::CONFIDENTIALITY | ClientRequestFlags::ALLOCATE_MEMORY)
+            .with_target_data_representation(DataRepresentation::Native)
+            .with_target_name(&target_name)
+            .with_output(&mut output_buffer);
+
+        let mut result = ntlm.initialize_security_context_impl(&mut builder)?
+            .resolve_to_result()?;
+        
+        let type1_bytes = output_buffer[0].buffer.clone();
+        let type1_b64 = general_purpose::STANDARD.encode(&type1_bytes);
+        
+        println!("Sending Type 1: Negotiate {}", type1_b64);
+
+        // Send Type 1 message
+        let response = self.client.post(&self.endpoint)
+            .header(AUTHORIZATION, format!("Negotiate {}", type1_b64))
+            .header(CONTENT_LENGTH, "0")
+            .body("")
+            .send()?;
+        
+        println!("Response Status: {}", response.status());
+
+        if response.status() != 401 {
+            return Err(WinRMError::AuthenticationFailed {
+                method: "NTLM".to_string(),
+                reason: format!("Expected 401 after Type 1 message, got: {}. Server may not support NTLM.", response.status())
+            }.into());
+        }
+
+        // Parse Type 2 challenge
+        let auth_header_val = response.headers().get("WWW-Authenticate")
+            .ok_or_else(|| WinRMError::InvalidResponse {
+                details: "Missing WWW-Authenticate header in NTLM response. Server may not be configured for NTLM authentication.".to_string()
+            })?
+            .to_str()?;
+        
+        if !auth_header_val.starts_with("Negotiate ") {
+            return Err(WinRMError::InvalidResponse {
+                details: format!("Expected 'Negotiate' challenge, got: '{}'. Server authentication scheme mismatch.", auth_header_val)
+            }.into());
+        }
+
+        let challenge_b64 = &auth_header_val[10..];
+        let challenge_bytes = general_purpose::STANDARD.decode(challenge_b64)?;
+        
+        println!("Received Type 2 challenge");
+
+        let mut input_buffer = vec![SecurityBuffer::new(challenge_bytes, BufferType::Token)];
+
+        // Loop for completing NTLM handshake
+        loop {
+            output_buffer[0].buffer.clear();
+
+            let mut builder = ntlm.initialize_security_context()
+                .with_credentials_handle(&mut acq_cred_result.credentials_handle)
+                .with_context_requirements(ClientRequestFlags::CONFIDENTIALITY | ClientRequestFlags::ALLOCATE_MEMORY)
+                .with_target_data_representation(DataRepresentation::Native)
+                .with_target_name(&target_name)
+                .with_input(&mut input_buffer)
+                .with_output(&mut output_buffer);
+
+            result = ntlm.initialize_security_context_impl(&mut builder)?
+                .resolve_to_result()?;
+
+            // Check if we need to complete the token
+            if [SecurityStatus::CompleteAndContinue, SecurityStatus::CompleteNeeded].contains(&result.status) {
+                println!("Completing the token...");
+                ntlm.complete_auth_token(&mut output_buffer)?;
+            }
+
+            // This is our Type 3 message - send it with the actual SOAP body
+            let type3_bytes = output_buffer[0].buffer.clone();
+            let type3_b64 = general_purpose::STANDARD.encode(&type3_bytes);
+            
+            println!("Sending Type 3 with actual SOAP request");
+            
+            let response = self.client.post(&self.endpoint)
+                .header(AUTHORIZATION, format!("Negotiate {}", type3_b64))
+                .header(CONTENT_TYPE, "application/soap+xml;charset=UTF-8")
+                .body(original_body.to_string())
+                .send()?;
+            
+            let status = response.status();
+            let response_text = response.text().unwrap_or_default();
+            
+            if status != 200 {
+                println!("Response body: {}", response_text);
+                return Err(WinRMError::AuthenticationFailed {
+                    method: "NTLM".to_string(),
+                    reason: format!("Server returned {} after authentication handshake. Check credentials and server configuration.", status)
+                }.into());
+            }
+            
+            // Break if we don't need to continue
+            if ![SecurityStatus::CompleteAndContinue, SecurityStatus::ContinueNeeded].contains(&result.status) {
+                println!("NTLM handshake complete!");
+                return Ok(response_text);
+            }
+
+            input_buffer[0].buffer.clear();
+        }
+    }
+
+    pub fn open_shell(&mut self) -> Result<String> {
+        let header = crate::xml::create_header(
+            "http://schemas.xmlsoap.org/ws/2004/09/transfer/Create",
+            "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd",
+            None,
+            &self.endpoint
+        );
+        let body = crate::xml::create_shell_body();
+        let envelope = crate::xml::create_envelope(&header, &body);
+
+        let response = self.send_message(&envelope)?;
+        
+        if let Some(start) = response.find("Name=\"ShellId\">") {
+            let rest = &response[start + 15..];
+            if let Some(end) = rest.find('<') {
+                return Ok(rest[..end].to_string());
+            }
+        }
+        
+        Err(WinRMError::InvalidResponse {
+            details: "ShellId not found in server response. Server may not support WinRM shell operations or response format is invalid.".to_string()
+        }.into())
+    }
+
+    pub fn run_command(&mut self, shell_id: &str, command: &str) -> Result<String> {
+        let header = crate::xml::create_header(
+            "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Command",
+            "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd",
+            Some(shell_id),
+            &self.endpoint
+        );
+        
+        let header = header.replace("</env:Header>", r#"<w:OptionSet><w:Option Name="WINRS_CONSOLEMODE_STDIN">TRUE</w:Option><w:Option Name="WINRS_SKIP_CMD_SHELL">FALSE</w:Option></w:OptionSet></env:Header>"#);
+        
+        let body = crate::xml::create_command_body(command);
+        let envelope = crate::xml::create_envelope(&header, &body);
+
+        let response = self.send_message(&envelope)?;
+        
+        if let Some(start) = response.find("CommandId=\"") {
+             let rest = &response[start + 11..];
+             if let Some(end) = rest.find('\"') {
+                 return Ok(rest[..end].to_string());
+             }
+        }
+        if let Some(start) = response.find("CommandId>") {
+             let rest = &response[start + 10..];
+             if let Some(end) = rest.find('<') {
+                 return Ok(rest[..end].to_string());
+             }
+        }
+
+        Err(WinRMError::InvalidResponse {
+            details: "CommandId not found in server response. Command may have failed to start.".to_string()
+        }.into())
+    }
+
+    pub fn get_command_output(&mut self, shell_id: &str, command_id: &str) -> Result<(String, String, i32)> {
+        let header = crate::xml::create_header(
+            "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Receive",
+            "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd",
+            Some(shell_id),
+            &self.endpoint
+        );
+        let body = crate::xml::create_receive_body(command_id);
+        let envelope = crate::xml::create_envelope(&header, &body);
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+        let mut done = false;
+
+        while !done {
+            let response = self.send_message(&envelope)?;
+            
+            let mut current_pos = 0;
+            while let Some(start) = response[current_pos..].find("<rsp:Stream") {
+                let stream_start = current_pos + start;
+                let rest = &response[stream_start..];
+                
+                if let Some(close_tag) = rest.find("</rsp:Stream>") {
+                    let content_start = rest.find('>').unwrap() + 1;
+                    let content = &rest[content_start..close_tag];
+                    
+                    let is_stdout = rest.contains("Name=\"stdout\"");
+                    let is_stderr = rest.contains("Name=\"stderr\"");
+                    
+                    if let Ok(decoded) = general_purpose::STANDARD.decode(content) {
+                        let decoded_str = String::from_utf8_lossy(&decoded);
+                        if is_stdout {
+                            stdout.push_str(&decoded_str);
+                        } else if is_stderr {
+                            stderr.push_str(&decoded_str);
+                        }
+                    }
+                    
+                    current_pos = stream_start + close_tag + 13;
+                } else {
+                    break;
+                }
+            }
+
+            if response.contains("State=\"http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done\"") {
+                done = true;
+                if let Some(start) = response.find("<rsp:ExitCode>") {
+                    let rest = &response[start + 14..];
+                    if let Some(end) = rest.find('<') {
+                        exit_code = rest[..end].parse().unwrap_or(0);
+                    }
+                }
+            }
+        }
+
+        Ok((stdout, stderr, exit_code))
+    }
+
+    pub fn close_shell(&mut self, shell_id: &str) -> Result<()> {
+        let header = crate::xml::create_header(
+            "http://schemas.xmlsoap.org/ws/2004/09/transfer/Delete",
+            "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd",
+            Some(shell_id),
+            &self.endpoint
+        );
+        let body = crate::xml::create_delete_body();
+        let envelope = crate::xml::create_envelope(&header, &body);
+
+        self.send_message(&envelope)?;
+        Ok(())
+    }
+}
+
+
+    fn handle_kerberos_stub(&self) -> Result<String> {
+        Err(WinRMError::AuthenticationFailed {
+            method: "Kerberos".to_string(),
+            reason: "Kerberos authentication requires cross-krb5 feature and proper configuration.\n\
+                     Currently disabled due to API compatibility issues.\n\
+                     Use --auth ntlm as an alternative.".to_string()
+        }.into())
+    }
