@@ -1,13 +1,13 @@
 # Rust WinRM Client
 
-Windows Remote Management (WinRM) client written in Rust.
+Rust ile yazılmış Windows Uzaktan Yönetim (WinRM) istemcisi.
 
 ## Özellikler
 
 - ✅ **NTLM Kimlik Doğrulama** - Tam destek
 - ✅ **Uzantan Komut Çalıştırma** - PowerShell ve CMD
 - ✅ **Dosya Aktarımı** - İndirme & Gönderme
-- ✅ **Improved Error Handling** - Detaylı hata iletileri
+- ✅ **Geliştirilmiş Hata İşleme** - Detaylı hata iletileri
 - ✅ **CLI İyileştirmeleri** - Çıkış kodları, ortam değişkenleri, detaylı/sessiz çıktılar
 - ⚠️ **Kerberos** - Stub (bilgilendirici mesaj)
 
@@ -17,7 +17,7 @@ Windows Remote Management (WinRM) client written in Rust.
 cargo build --release
 ```
 
-Binary: `target/release/rust_winrm_client`
+Çalıştırılabilir ikilik dosya: `target/release/rust_winrm_client`
 
 ## Kullanım
 
@@ -74,14 +74,14 @@ winrm-client -v -e server command "test"
 
 | Kısa | Uzun | Ortam Değişkeni | Açıklama |
 |------|------|---------|----------|
-| `-e` | `--endpoint` | `WINRM_ENDPOINT` | WinRM endpoint (IP veya hostname) |
+| `-e` | `--endpoint` | `WINRM_ENDPOINT` | WinRM bağlantı noktası (IP veya hostname) |
 | `-u` | `--user` | `WINRM_USER` | Kullanıcı adı |
 | `-p` | `--password` | `WINRM_PASSWORD` | Parola |
-| `-a` | `--auth` | `WINRM_AUTH` | Auth metodu (ntlm/basic/kerberos) |
+| `-a` | `--auth` | `WINRM_AUTH` | Kimlik doğrulama yöntemi (ntlm/basic/kerberos) |
 | | `--encrypt` | `WINRM_ENCRYPT` | HTTPS kullan (port 5986) |
 | | `--no-encrypt` | `WINRM_NO_ENCRYPT` | HTTP kullan (port 5985) |
 | `-k` | `--insecure` | `WINRM_INSECURE` | SSL sertifika doğrulamasını atla |
-| `-v` | `--verbose` | `WINRM_VERBOSE` | Verbose output |
+| `-v` | `--verbose` | `WINRM_VERBOSE` | Detaylı çıktı |
 
 ## Çıkış Kodları
 
